@@ -1,4 +1,5 @@
 import json
+import os
 from pydantic import ValidationError
 from typing import Dict, Any, Optional
 from openai import OpenAI, APIConnectionError, APIStatusError
@@ -16,6 +17,7 @@ class LoomResponse(BaseModel):
         finish_reason (str): The reason the generation stopped (e.g., 'stop', 'length').
     """
     content: str
+    reasoning: Optional[str] = None
     token_usage: Dict[str, int]
     model_used: str
     finish_reason: str = Field(default="unknown")
@@ -32,9 +34,10 @@ class LoomClient:
 
     def __init__(
         self, 
-        host: str = "http://192.168.1.6:8080/v1", 
-        model_name: str = "gpt-120b",
-        api_key: str = "sk-no-key-required"
+        # UPDATED: Defaults for the new Spark infrastructure
+        host: str = os.getenv("LOOM_HOST", "http://192.168.1.42:8000/v1"), 
+        model_name: str = os.getenv("LOOM_MODEL", "gpt-oss-120b"),
+        api_key: str = "EMPTY"
     ) -> None:
         """
         Initialize the LoomClient.
@@ -53,7 +56,8 @@ class LoomClient:
         system_prompt: str, 
         user_prompt: str, 
         temperature: float = 0.7,
-        max_tokens: int = -1
+        max_tokens: int = -1,
+        enable_reasoning: bool = True,
     ) -> LoomResponse:
         """
         Generates a text completion from the local Loom engine.
@@ -99,11 +103,19 @@ class LoomClient:
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=temperature,
-                max_tokens=max_tokens if max_tokens > 0 else None
+                max_tokens=max_tokens if max_tokens > 0 else None,
+                extra_body={"enable_reasoning": enable_reasoning}
             )
 
             # Process Response
             choice = response.choices[0]
+            message = choice.message
+
+            # Extract the hidden reasoning field (vLLM specific)
+            # The OpenAI library stores unknown fields in 'model_extra' or attributes
+            reasoning_content = getattr(message, "reasoning_content", None)
+            if not reasoning_content and hasattr(message, "model_extra"):
+                reasoning_content = message.model_extra.get("reasoning_content")
             
             # Explicitly extract only the standard fields to avoid Pydantic errors
             # caused by 'None' values in new OpenAI library fields (like token_details).
@@ -116,6 +128,7 @@ class LoomClient:
             # Satisfy Post-conditions via Pydantic validation
             return LoomResponse(
                 content=choice.message.content or "",
+                reasoning=reasoning_content,
                 token_usage=usage_stats,
                 model_used=response.model,
                 finish_reason=choice.finish_reason
